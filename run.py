@@ -6,6 +6,7 @@ from datetime import datetime
 import subprocess
 import re
 import requests
+import json
 
 import Adafruit_CharLCD as LCD
 
@@ -89,9 +90,9 @@ class BusLoc:
         return self.last_time_str
 
 class WebWeather:
-    def __init__(self):
+    def __init__(self, config):
         self.gainesville_id = 4692748
-        self.key = '8432745e177e419a128a0f6ada089a53'
+        self.key = config['keys']['open-weather']
         self.refresh_time = 10 * 60
         self.last_refresh_time = None
         self.last_weather_res = None
@@ -108,10 +109,17 @@ class WebWeather:
                 self.last_weather_res = None
 
             res = r.json()
-            self.last_weather_res = {
-                    'main': res['weather'][0]['main'],
-                    'curr': (res['main']['temp'] - 273.15)
-                    }
+            try:
+                self.last_weather_res = {
+                        'main': res['weather'][0]['main'],
+                        'curr': (res['main']['temp'] - 273.15)
+                }
+            except KeyError:
+                self.last_weather_res = {
+                    'main': 'NA',
+                    'curr': 'NA'
+                }
+
             self.last_refresh_time = int(time.time())
         return self.last_weather_res
 
@@ -127,10 +135,16 @@ class WebWeather:
                 self.last_weather_res = None
 
             res = r.json()
-            self.last_forecast_res = {
-                    'main': res['list'][0]['weather'][0]['main'],
-                    'desc': res['list'][0]['weather'][0]['description']
-                    }
+            try:
+                self.last_forecast_res = {
+                        'main': res['list'][0]['weather'][0]['main'],
+                        'desc': res['list'][0]['weather'][0]['description']
+                }
+            except KeyError:
+                self.last_forecast_res = {
+                    'main': 'NA',
+                    'curr': 'NA'
+                }
             self.last_refresh_time = int(time.time())
         return self.last_forecast_res
 
@@ -141,11 +155,11 @@ def splash():
         lcd.message("Starting in\n" + str(10 - i) + " seconds")
         time.sleep(1.0)
 
-def loop():
+def loop(config):
     sys_ip = SysIp()
     sys_temp = SysTemp()
     bus_loc = BusLoc()
-    web_weather = WebWeather()
+    web_weather = WebWeather(config)
     #lcd.set_backlight(0)
 
     while (True):
@@ -175,4 +189,6 @@ if __name__ == "__main__":
     print "Clock started at " + str(datetime.now())
     sys.stdout.flush()
     splash()
-    loop()
+    with open("./config.json") as config_file:
+        config = json.load(config_file)
+    loop(config)
