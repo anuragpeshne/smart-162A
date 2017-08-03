@@ -1,12 +1,18 @@
 #!/usr/bin/env python
 
-import sys
+import sys, os
 import time
 from datetime import datetime
 import subprocess
 import re
 import requests
 import json
+
+import Queue
+
+if os.environ.get("DISPLAY", None) is None:
+    os.environ["DISPLAY"] = ":0"
+from pynput import keyboard
 
 import Adafruit_CharLCD as LCD
 
@@ -29,6 +35,24 @@ lcd = LCD.Adafruit_CharLCD(lcd_rs, lcd_en, lcd_d4, lcd_d5, lcd_d6, lcd_d7,
                            lcd_columns, lcd_rows, lcd_backlight)
 
 # lcd init over
+
+keyQueue = Queue.Queue()
+
+def on_press(key):
+    try:
+        print('alphanumeric key {0} pressed'.format(
+            key.char))
+    except AttributeError:
+        print('special key {0} pressed'.format(
+            key))
+
+def on_release(key):
+    print('{0} released'.format(
+        key))
+    keyQueue.put(key.char)
+    if key == keyboard.Key.esc:
+        # Stop listener
+        return False
 
 class SysIp:
     def __init__(self):
@@ -155,6 +179,12 @@ def splash():
         lcd.message("Starting in\n" + str(10 - i) + " seconds")
         time.sleep(1.0)
 
+def shutdown():
+    print "Shutting down"
+    lcd.clear()
+    lcd.message("Bye!")
+    os.system("sudo shutdown -h now")
+
 def loop(config):
     sys_ip = SysIp()
     sys_temp = SysTemp()
@@ -185,10 +215,20 @@ def loop(config):
         lcd.message(forecast['main'] + '\n' + forecast['desc'])
         time.sleep(6.0)
 
+        if not keyQueue.empty():
+            key = keyQueue.get()
+            if key == 's':
+                shutdown()
+
 if __name__ == "__main__":
-    print "Clock started at " + str(datetime.now())
-    sys.stdout.flush()
-    splash()
-    with open("./config.json") as config_file:
-        config = json.load(config_file)
-    loop(config)
+    with keyboard.Listener(on_release=on_release) as listener:
+        try:
+            print "Clock started at " + str(datetime.now())
+            sys.stdout.flush()
+            splash()
+            cur_path = os.path.dirname(os.path.realpath(__file__))
+            with open(cur_path + "/config.json") as config_file:
+                config = json.load(config_file)
+            loop(config)
+        finally:
+            listener.stop()
