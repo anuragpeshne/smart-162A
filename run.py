@@ -1,234 +1,189 @@
 #!/usr/bin/env python
 
-import sys, os
-import time
+from subprocess import Popen, PIPE, check_output
+from time import sleep
 from datetime import datetime
-import subprocess
+import json
+import os
 import re
 import requests
-import json
+import time
 
-import Queue
+import board
+import digitalio
+import adafruit_character_lcd.character_lcd as characterlcd
 
-if os.environ.get("DISPLAY", None) is None:
-    os.environ["DISPLAY"] = ":0"
-from pynput import keyboard
-
-import Adafruit_CharLCD as LCD
-
-
-# Raspberry Pi pin configuration:
-lcd_rs        = 25  # Note this might need to be changed to 21 for older revision Pi's.
-lcd_en        = 24
-lcd_d4        = 23
-lcd_d5        = 17
-lcd_d6        = 27
-lcd_d7        = 22
-lcd_backlight = 4
-
-# Define LCD column and row size for 16x2 LCD.
+# Modify this if you have a different sized character LCD
 lcd_columns = 16
-lcd_rows    = 2
+lcd_rows = 2
 
-# Initialize the LCD using the pins above.
-lcd = LCD.Adafruit_CharLCD(lcd_rs, lcd_en, lcd_d4, lcd_d5, lcd_d6, lcd_d7,
-                           lcd_columns, lcd_rows, lcd_backlight)
+# compatible with all versions of RPI as of Jan. 2019
+# v1 - v3B+
+lcd_rs = digitalio.DigitalInOut(board.D27)
+lcd_en = digitalio.DigitalInOut(board.D17)
+lcd_d4 = digitalio.DigitalInOut(board.D25)
+lcd_d5 = digitalio.DigitalInOut(board.D24)
+lcd_d6 = digitalio.DigitalInOut(board.D23)
+lcd_d7 = digitalio.DigitalInOut(board.D18)
+lcd_backlight = digitalio.DigitalInOut(board.D13)
 
-# lcd init over
 
-keyQueue = Queue.Queue()
+# Initialise the lcd class
+lcd = characterlcd.Character_LCD_Mono(lcd_rs, lcd_en, lcd_d4, lcd_d5, lcd_d6,
+                                      lcd_d7, lcd_columns, lcd_rows)
 
-def on_press(key):
-    try:
-        print('alphanumeric key {0} pressed'.format(
-            key.char))
-    except AttributeError:
-        print('special key {0} pressed'.format(
-            key))
+def cpu_temp():
+    with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            cpu_temp_lines = f.readlines()
+    cpu_temp_str = cpu_temp_lines[0].strip()
+    cpu_temp = str(int(cpu_temp_str) / 1000.0) + " C"
+    return cpu_temp
 
-def on_release(key):
-    print('{0} released'.format(
-        key))
-    keyQueue.put(key.char)
-    if key == keyboard.Key.esc:
-        # Stop listener
-        return False
-
-class SysIp:
+class ProviderBase:
     def __init__(self):
+        self.refresh_time = 60
+        self.last_refresh_time = int(time.time())
+        self.last_str = None
+
+    def get(self):
+        if (self.last_str is None or
+            (int(time.time()) - self.last_refresh_time) > self.refresh_time):
+            print("cache miss")
+            self.last_str = self.get_uncached()
+            self.last_refresh_time = int(time.time())
+        return self.last_str
+
+    def get_uncached(self):
+        raise NotImplementedError( "Should have implemented this" )
+
+class RoomTemp(ProviderBase):
+    def __init__(self):
+        ProviderBase.__init__(self)
+
+    def room_temp(self):
+        temp_str = str(check_output([
+            "tail", "-n", "1", "/home/pi/code/tempd/tempdb"]))
+        temp = re.search('Temp=(\d+.\d)', temp_str).group(1) + " C"
+        humidity = re.search('Humidity=(\d+.\d)', temp_str).group(1) + " %"
+        return "Room: " + temp + "\n" + "Humi: " + humidity
+
+    def get_uncached(self):
+        return self.room_temp()
+
+
+
+class SysIp(ProviderBase):
+    def __init__(self):
+        ProviderBase.__init__(self)
         self.refresh_time = 60 * 60 * 12
-        self.last_refresh_time = int(time.time())
-        self.last_ip_str = None
 
-    def get_sys_ip(self):
-        if (self.last_ip_str is None or
-            (int(time.time()) - self.last_refresh_time) > self.refresh_time):
-            p1 = subprocess.Popen(["ifconfig"], stdout=subprocess.PIPE)
-            p2 = subprocess.Popen(["grep", "inet addr:192"],
-                                  stdin=p1.stdout,
-                                  stdout=subprocess.PIPE)
-            p1.stdout.close()
-            self.last_ip_str = re.findall(r"192\.\d+\.\d+.\d+",
-                                            p2.communicate()[0])[0]
-            self.last_refresh_time = int(time.time())
+    def sys_ip(self):
+        p1 = Popen(["ifconfig"], stdout=PIPE)
+        p2 = Popen(["grep", "inet addr:192"], stdin=p1.stdout, stdout=PIPE)
+        p1.stdout.close()
+        return re.findall(r"192\.\d+\.\d+.\d+", p2.communicate()[0])[0]
 
-        return self.last_ip_str
+    def get_uncached(self):
+        return self.sys_ip()
 
 
-class SysTemp:
+class SysInfo(ProviderBase):
     def __init__(self):
-        self.refresh_time = 30
-        self.last_refresh_time = int(time.time())
-        self.last_temp_str = None
+        ProviderBase.__init__(self)
 
-    def get_sys_temp(self):
-        if (self.last_temp_str is None or
-            (int(time.time()) - self.last_refresh_time) > self.refresh_time):
-            p1 = subprocess.check_output(['/opt/vc/bin/vcgencmd', 'measure_temp'])
-            self.last_temp_str = p1[5:].strip()
-            self.last_refresh_time = int(time.time())
+    def temp(self):
+        p1 = str(check_output(['/opt/vc/bin/vcgencmd', 'measure_temp']))
+        return p1[7:11] + " C"
 
-        return self.last_temp_str
+    def get_uncached(self):
+        return "Sys: " + self.temp()
 
-class BusLoc:
+class BusLoc(ProviderBase):
     def __init__(self):
+        ProviderBase.__init__(self)
         self.refresh_time = 2 * 60
-        self.last_refresh_time = int(time.time())
-        self.last_time_str = None
         self.wait_time_regex = re.compile("wait_time time_1.*Plaza\">(.*)<abbr")
-    def get_time_greenwitch_to_r(self):
-        if (self.last_time_str is None or
-            (int(time.time()) - self.last_refresh_time) > self.refresh_time):
-            self.last_refresh_time = int(time.time())
 
-            r = requests.get('https://ufl.transloc.com/t/stops/4195938')
-            if r.status_code != 200:
-                self.last_time_str = 'Unavailable'
+    def time_greenwitch_to_r(self):
+        r = requests.get('https://ufl.transloc.com/t/stops/4195938')
+        if r.status_code != 200:
+            bus_str = 'Unavailable'
 
-            bus_list = re.findall(self.wait_time_regex, r.text)
-            if len(bus_list) > 0:
-                self.last_time_str = bus_list[0].strip() + ' min'
-            else:
-                self.last_time_str = 'Unavailable'
+        bus_list = re.findall(self.wait_time_regex, r.text)
+        if len(bus_list) > 0:
+            bus_str = bus_list[0].strip() + ' min'
+        else:
+            bus_str = 'Unavailable'
 
-        return self.last_time_str
+        return bus_str
 
-class WebWeather:
+    def get_uncached(self):
+        return self.time_greenwitch_to_r()
+
+class WebWeather(ProviderBase):
     def __init__(self, config):
-        self.gainesville_id = 4692748
+        ProviderBase.__init__(self)
+        self.city_id = 5808079
         self.key = config['keys']['open-weather']
         self.refresh_time = 10 * 60
-        self.last_refresh_time = None
-        self.last_weather_res = None
-        self.last_forecast_res = None
 
-    def now(self):
-        if (self.last_weather_res is None or
-            (int(time.time()) - self.last_refresh_time) > self.refresh_time):
-            r = requests.get('http://api.openweathermap.org/data/2.5/weather?id=' +
-                             str(self.gainesville_id) +
-                             '&appid=' +
-                             self.key)
-            if r.status_code != 200:
-                self.last_weather_res = None
+    def weather_str(self):
+        r = requests.get('http://api.openweathermap.org/data/2.5/weather?id=' +
+                         str(self.city_id) +
+                         '&appid=' +
+                         self.key)
+        if r.status_code != 200:
+            weather_str = None
 
-            res = r.json()
-            try:
-                self.last_weather_res = {
-                        'main': res['weather'][0]['main'],
-                        'curr': (res['main']['temp'] - 273.15)
-                }
-            except KeyError:
-                self.last_weather_res = {
-                    'main': 'NA',
-                    'curr': 'NA'
-                }
+        res = r.json()
+        try:
+            weather_str = ("{:.1f}".format(res['main']['temp_min'] - 273.15) + '<' +
+                           "{:.1f}".format(res['main']['temp'] - 273.15) + '<' +
+                           "{:.1f}".format(res['main']['temp_max'] - 273.15) + ' C' +
+                           '\n' + str(res['main']['humidity']) + '%' +
+                           ' | ' + str(res['weather'][0]['main']))
+        except KeyError:
+            weather_str = 'main' + 'NA' + 'curr' + 'NA'
 
-            self.last_refresh_time = int(time.time())
-        return self.last_weather_res
+        return weather_str
 
-    def forecast(self):
-        #since this is forecast, 10X refresh time
-        if (self.last_forecast_res is None or
-            (int(time.time()) - self.last_refresh_time) > (self.refresh_time * 10)):
-            r = requests.get('http://api.openweathermap.org/data/2.5/forecast?id=' +
-                             str(self.gainesville_id) +
-                             '&appid=' +
-                             self.key)
-            if r.status_code != 200:
-                self.last_weather_res = None
+    def get_uncached(self):
+        return self.weather_str()
 
-            res = r.json()
-            try:
-                self.last_forecast_res = {
-                        'main': res['list'][0]['weather'][0]['main'],
-                        'desc': res['list'][0]['weather'][0]['description']
-                }
-            except KeyError:
-                self.last_forecast_res = {
-                    'main': 'NA',
-                    'curr': 'NA'
-                }
-            self.last_refresh_time = int(time.time())
-        return self.last_forecast_res
-
-def splash():
+def splash(duration):
     # this is not a fancy feature, this is so that sys gets enough time to startup
-    for i in range(10):
+    for i in range(duration, -1, -1):
         lcd.clear()
-        lcd.message("Starting in\n" + str(10 - i) + " seconds")
+        lcd.message = "Starting in\n" + str(i) + " seconds"
         time.sleep(1.0)
 
 def shutdown():
-    print "Shutting down"
+    print("Shutting down")
     lcd.clear()
-    lcd.message("Bye!")
+    lcd.message = "Bye!"
     os.system("sudo shutdown -h now")
 
 def loop(config):
     sys_ip = SysIp()
-    sys_temp = SysTemp()
-    bus_loc = BusLoc()
+    sys_info = SysInfo()
+    #bus_loc = BusLoc()
+    room_temp = RoomTemp()
     web_weather = WebWeather(config)
     #lcd.set_backlight(0)
 
+    enabled_providers = [sys_info, room_temp, web_weather]
+
     while (True):
-        lcd.clear()
-        timestr = datetime.now().strftime('%a %b %d\n%H:%M %p')
-        temp = web_weather.now()['curr']
-        lcd.message(timestr + ' ' + str(temp) + 'C')
+        for provider in enabled_providers:
+            lcd.clear()
+            lcd.message = provider.get()
+            time.sleep(5.0)
 
-        # Wait 5 seconds
-        time.sleep(8.0)
-
-        lcd.clear()
-        lcd.message("IP:" + sys_ip.get_sys_ip() + "\n" +
-                    "Sys temp:" + sys_temp.get_sys_temp())
-        time.sleep(4.0)
-
-        lcd.clear()
-        lcd.message("-> Reitz:\n" + bus_loc.get_time_greenwitch_to_r())
-        time.sleep(6.0)
-
-        lcd.clear()
-        forecast = web_weather.forecast()
-        lcd.message(forecast['main'] + '\n' + forecast['desc'])
-        time.sleep(6.0)
-
-        if not keyQueue.empty():
-            key = keyQueue.get()
-            if key == 's':
-                shutdown()
 
 if __name__ == "__main__":
-    with keyboard.Listener(on_release=on_release) as listener:
-        try:
-            print "Clock started at " + str(datetime.now())
-            sys.stdout.flush()
-            splash()
-            cur_path = os.path.dirname(os.path.realpath(__file__))
-            with open(cur_path + "/config.json") as config_file:
-                config = json.load(config_file)
-            loop(config)
-        finally:
-            listener.stop()
+    print("Clock started at " + str(datetime.now()))
+    splash(3)
+    cur_path = os.path.dirname(os.path.realpath(__file__))
+    with open(cur_path + "/config.json") as config_file:
+        config = json.load(config_file)
+    loop(config)
