@@ -128,20 +128,19 @@ class WebWeather(ProviderBase):
         self.refresh_time = 10 * 60
 
     def weather_str(self):
-        r = requests.get('http://api.openweathermap.org/data/2.5/weather?id=' +
-                         str(self.city_id) +
-                         '&appid=' +
-                         self.key)
-        if r.status_code != 200:
-            weather_str = None
-
-        res = r.json()
         try:
+            r = requests.get('http://api.openweathermap.org/data/2.5/weather?id=' +
+                             str(self.city_id) +
+                             '&appid=' +
+                             self.key)
+            res = r.json()
             weather_str = ("{:.1f}".format(res['main']['temp_min'] - 273.15) + '<' +
                            "{:.1f}".format(res['main']['temp'] - 273.15) + '<' +
                            "{:.1f}".format(res['main']['temp_max'] - 273.15) + ' C' +
                            '\n' + str(res['main']['humidity']) + '%' +
                            ' | ' + str(res['weather'][0]['main']))
+        except requests.exceptions.RequestException:
+            weather_str = 'main' + 'NA' + 'curr' + 'NA'
         except KeyError:
             weather_str = 'main' + 'NA' + 'curr' + 'NA'
 
